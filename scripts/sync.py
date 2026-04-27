@@ -62,11 +62,9 @@ def get_default_branch(repo):
     return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else "main"
 
 
-def get_commit_date(repo, path):
-    """Last commit date for a file via GitHub API."""
-    r = gh(["api", f"repos/{repo}/commits",
-            "--jq", ".[0].commit.committer.date",
-            "-f", f"path={path}", "-f", "per_page=1"])
+def get_commit_date(clone_dir, path):
+    """Last commit date for a file using git log on the cloned repo."""
+    r = run(["git", "-C", clone_dir, "log", "-1", "--format=%aI", "--", path])
     return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
 
 
@@ -223,16 +221,16 @@ def main():
     push_to_source = {}  # rel_file -> (abs_path_of_newest, from_repo)
 
     for f in sorted(modified_files):
-        src_api_path = f"{SOURCE_PATH}/{f}" if SOURCE_PATH else f
-        src_date = get_commit_date(SOURCE_REPO, src_api_path)
+        src_git_path = f"{SOURCE_PATH}/{f}" if SOURCE_PATH else f
+        src_date = get_commit_date(source_dir, src_git_path)
 
         newest_repo = None
         newest_date = src_date
         newest_abs = None
 
         for repo, target_root in modified_files[f].items():
-            tgt_api_path = f"{target_info[repo]['shared_path']}/{f}"
-            tgt_date = get_commit_date(repo, tgt_api_path)
+            tgt_git_path = f"{target_info[repo]['shared_path']}/{f}"
+            tgt_date = get_commit_date(target_info[repo]["dest"], tgt_git_path)
 
             if tgt_date and (not newest_date or tgt_date > newest_date):
                 newest_date = tgt_date
