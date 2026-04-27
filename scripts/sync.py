@@ -69,16 +69,29 @@ def get_gh_user():
 
 
 def ensure_fork(upstream_repo):
-    """Fork the repo if not already forked. Returns the fork's full name."""
-    r = gh(["repo", "fork", upstream_repo, "--clone=false"])
-    # gh repo fork prints to stderr even on success, so check both
+    """Fork the repo if not already forked. Returns the fork's full name.
+    Falls back to upstream if fork can't be created (user may have direct access)."""
     user = get_gh_user()
     if not user:
         print("    Could not determine GitHub user for fork")
         return None
+
     repo_name = upstream_repo.split("/")[1]
     fork = f"{user}/{repo_name}"
-    return fork
+
+    # Check if the fork already exists
+    r = gh(["api", f"repos/{fork}", "--jq", ".full_name"])
+    if r.returncode == 0 and r.stdout.strip():
+        return r.stdout.strip()
+
+    # Try to create the fork
+    r = gh(["repo", "fork", upstream_repo, "--clone=false"])
+    if r.returncode == 0:
+        return fork
+
+    # Fork failed — fall back to pushing directly to upstream
+    print(f"    Fork failed, will push directly to {upstream_repo}")
+    return upstream_repo
 
 
 def get_default_branch(repo):
@@ -109,16 +122,24 @@ def clone_sparse(repo, branch, sparse_path, dest):
     return r.returncode == 0
 
 
-def add_fork_remote(fork_repo, dest):
-    """Add the fork as a 'fork' remote and configure auth for pushing."""
+def setup_push_remote(fork_repo, upstream_repo, dest):
+    """Configure a remote for pushing. Returns the remote name to use.
+    If fork == upstream, reconfigures 'origin' with auth. Otherwise adds 'fork'."""
     token = os.environ.get("GH_TOKEN", "")
     if token:
         url = f"https://x-access-token:{token}@github.com/{fork_repo}.git"
     else:
         url = f"https://github.com/{fork_repo}.git"
-    # Remove existing fork remote if present
-    run(["git", "remote", "remove", "fork"], cwd=dest)
-    run(["git", "remote", "add", "fork", url], cwd=dest)
+
+    if fork_repo == upstream_repo:
+        # Direct push to upstream — update origin URL with auth
+        run(["git", "remote", "set-url", "origin", url], cwd=dest)
+        return "origin"
+    else:
+        # Push to fork
+        run(["git", "remote", "remove", "fork"], cwd=dest)
+        run(["git", "remote", "add", "fork", url], cwd=dest)
+        return "fork"
 
 
 def git_config(dest):
@@ -157,14 +178,14 @@ def get_file_map(directory):
 
 
 def pr_exists(upstream_repo, gh_user, branch):
-    head = f"{gh_user}:{branch}"
+    head = f"{gh_user}:{branch}" if gh_user else branch
     r = gh(["pr", "list", "--repo", upstream_repo, "--head", head,
             "--state", "open", "--json", "number", "--jq", "length"])
     return r.returncode == 0 and r.stdout.strip() not in ("", "0")
 
 
 def create_pr(upstream_repo, gh_user, branch, base, title, body):
-    head = f"{gh_user}:{branch}"
+    head = f"{gh_user}:{branch}" if gh_user else branch
     if pr_exists(upstream_repo, gh_user, branch):
         print(f"    PR already open for {head}, push updated it")
         return
@@ -285,12 +306,13 @@ def main():
     if push_to_source:
         print(f"\n--- Phase 1: pushing {len(push_to_source)} file(s) to source ---\n")
 
-        print(f"  Forking {SOURCE_REPO}...")
         source_fork = ensure_fork(SOURCE_REPO)
         if not source_fork:
-            print("  ERROR: Could not fork source repo")
+            print("  ERROR: Could not resolve push target for source repo")
         else:
-            add_fork_remote(source_fork, source_dir)
+            remote = setup_push_remote(source_fork, SOURCE_REPO, source_dir)
+            is_direct = source_fork == SOURCE_REPO
+            pr_head_user = gh_user if not is_direct else None
 
             run(["git", "checkout", SOURCE_BRANCH], cwd=source_dir)
             run(["git", "branch", "-D", SYNC_BRANCH], cwd=source_dir)
@@ -310,12 +332,13 @@ def main():
             if commit.returncode != 0:
                 print("  No changes to commit (source already up to date)")
             else:
-                push = run(["git", "push", "--force", "fork", SYNC_BRANCH], cwd=source_dir)
+                push = run(["git", "push", "--force", remote, SYNC_BRANCH], cwd=source_dir)
                 if push.returncode == 0:
                     body_lines = ["Pulls newer changes from docs repos:\n"]
                     for f, (_, repo) in sorted(push_to_source.items()):
                         body_lines.append(f"- `{f}` from **{repo}**")
-                    create_pr(SOURCE_REPO, gh_user, SYNC_BRANCH, SOURCE_BRANCH,
+                    head = f"{pr_head_user}:{SYNC_BRANCH}" if pr_head_user else SYNC_BRANCH
+                    create_pr(SOURCE_REPO, pr_head_user, SYNC_BRANCH, SOURCE_BRANCH,
                               "sync: pull newer shared components from docs repos",
                               "\n".join(body_lines))
                 else:
@@ -366,13 +389,14 @@ def main():
 
         print(f"  {repo}: {len(to_update)} file(s) to update")
 
-        print(f"    Forking {repo}...")
         fork = ensure_fork(repo)
         if not fork:
-            print(f"    ERROR: Could not fork {repo}")
+            print(f"    ERROR: Could not resolve push target for {repo}")
             continue
 
-        add_fork_remote(fork, dest)
+        remote = setup_push_remote(fork, repo, dest)
+        is_direct = fork == repo
+        pr_head_user = gh_user if not is_direct else None
 
         run(["git", "checkout", base_branch], cwd=dest)
         run(["git", "branch", "-D", SYNC_BRANCH], cwd=dest)
@@ -394,7 +418,7 @@ def main():
             print(f"    No changes to commit")
             continue
 
-        push = run(["git", "push", "--force", "fork", SYNC_BRANCH], cwd=dest)
+        push = run(["git", "push", "--force", remote, SYNC_BRANCH], cwd=dest)
         if push.returncode == 0:
             body_lines = [
                 f"Syncs `{info['shared_path']}` with "
@@ -404,7 +428,7 @@ def main():
             ]
             for f in sorted(to_update):
                 body_lines.append(f"- `{f}`")
-            create_pr(repo, gh_user, SYNC_BRANCH, base_branch,
+            create_pr(repo, pr_head_user, SYNC_BRANCH, base_branch,
                       "sync: update shared Docusaurus components",
                       "\n".join(body_lines))
         else:
