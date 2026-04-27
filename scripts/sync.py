@@ -7,6 +7,9 @@ Phase 1 — For files where a target repo has a newer version than the source,
           creates a PR to ML-Shared-Docusaurus with those updates.
 Phase 2 — For each target repo, creates a PR pulling the canonical source
           (source + Phase 1 updates) so every repo ends up identical.
+
+Uses a fork-based workflow: pushes branches to your fork of each repo,
+then opens PRs from the fork to upstream.
 """
 
 import hashlib
@@ -57,6 +60,27 @@ def gh(args):
     return r
 
 
+def get_gh_user():
+    """Get the authenticated GitHub username."""
+    r = gh(["api", "user", "--jq", ".login"])
+    if r.returncode == 0 and r.stdout.strip():
+        return r.stdout.strip()
+    return None
+
+
+def ensure_fork(upstream_repo):
+    """Fork the repo if not already forked. Returns the fork's full name."""
+    r = gh(["repo", "fork", upstream_repo, "--clone=false"])
+    # gh repo fork prints to stderr even on success, so check both
+    user = get_gh_user()
+    if not user:
+        print("    Could not determine GitHub user for fork")
+        return None
+    repo_name = upstream_repo.split("/")[1]
+    fork = f"{user}/{repo_name}"
+    return fork
+
+
 def get_default_branch(repo):
     r = gh(["api", f"repos/{repo}", "--jq", ".default_branch"])
     return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else "main"
@@ -85,18 +109,25 @@ def clone_sparse(repo, branch, sparse_path, dest):
     return r.returncode == 0
 
 
-def set_push_url(repo, dest):
-    """Configure the remote URL with the GH_TOKEN for pushing."""
+def add_fork_remote(fork_repo, dest):
+    """Add the fork as a 'fork' remote and configure auth for pushing."""
     token = os.environ.get("GH_TOKEN", "")
     if token:
-        run(["git", "remote", "set-url", "origin",
-             f"https://x-access-token:{token}@github.com/{repo}.git"], cwd=dest)
+        url = f"https://x-access-token:{token}@github.com/{fork_repo}.git"
+    else:
+        url = f"https://github.com/{fork_repo}.git"
+    # Remove existing fork remote if present
+    run(["git", "remote", "remove", "fork"], cwd=dest)
+    run(["git", "remote", "add", "fork", url], cwd=dest)
 
 
 def git_config(dest):
-    run(["git", "config", "user.name", "github-actions[bot]"], cwd=dest)
-    run(["git", "config", "user.email",
-         "41898282+github-actions[bot]@users.noreply.github.com"], cwd=dest)
+    r = gh(["api", "user", "--jq", ".login"])
+    user = r.stdout.strip() if r.returncode == 0 else "github-actions[bot]"
+    r2 = gh(["api", "user", "--jq", ".email // .login"])
+    email = r2.stdout.strip() if r2.returncode == 0 else f"{user}@users.noreply.github.com"
+    run(["git", "config", "user.name", user], cwd=dest)
+    run(["git", "config", "user.email", f"{user}@users.noreply.github.com"], cwd=dest)
 
 
 def file_hash(path):
@@ -125,18 +156,20 @@ def get_file_map(directory):
     return files
 
 
-def pr_exists(repo, branch):
-    r = gh(["pr", "list", "--repo", repo, "--head", branch,
+def pr_exists(upstream_repo, gh_user, branch):
+    head = f"{gh_user}:{branch}"
+    r = gh(["pr", "list", "--repo", upstream_repo, "--head", head,
             "--state", "open", "--json", "number", "--jq", "length"])
     return r.returncode == 0 and r.stdout.strip() not in ("", "0")
 
 
-def create_pr(repo, branch, base, title, body):
-    if pr_exists(repo, branch):
-        print(f"    PR already open for {branch}, push updated it")
+def create_pr(upstream_repo, gh_user, branch, base, title, body):
+    head = f"{gh_user}:{branch}"
+    if pr_exists(upstream_repo, gh_user, branch):
+        print(f"    PR already open for {head}, push updated it")
         return
-    r = gh(["pr", "create", "--repo", repo,
-            "--head", branch, "--base", base,
+    r = gh(["pr", "create", "--repo", upstream_repo,
+            "--head", head, "--base", base,
             "--title", title, "--body", body])
     if r.returncode == 0:
         print(f"    PR created: {r.stdout.strip()}")
@@ -152,6 +185,13 @@ def create_pr(repo, branch, base, title, body):
 def main():
     print("=== Shared Docusaurus Sync ===\n")
 
+    # Detect authenticated user
+    gh_user = get_gh_user()
+    if not gh_user:
+        print("ERROR: Could not detect GitHub user. Set GH_TOKEN or run gh auth login.")
+        sys.exit(1)
+    print(f"Authenticated as: {gh_user}\n")
+
     if os.path.exists(WORK_DIR):
         shutil.rmtree(WORK_DIR)
     os.makedirs(WORK_DIR)
@@ -162,7 +202,6 @@ def main():
     if not clone_full(SOURCE_REPO, SOURCE_BRANCH, source_dir):
         print("ERROR: Failed to clone source")
         sys.exit(1)
-    set_push_url(SOURCE_REPO, source_dir)
     git_config(source_dir)
 
     source_root = os.path.join(source_dir, SOURCE_PATH) if SOURCE_PATH else source_dir
@@ -189,7 +228,6 @@ def main():
             print(f"  {shared_path} not found\n")
             continue
 
-        set_push_url(repo, dest)
         git_config(dest)
 
         target_files = get_file_map(target_root)
@@ -203,7 +241,6 @@ def main():
         print(f"  {len(target_files)} file(s)\n")
 
     # ---- Detect modified files and determine direction ----
-    # Collect all files that differ between source and any target
     modified_files = {}  # rel_file -> {repo: target_root_path}
     for repo, info in target_info.items():
         for f in source_files:
@@ -244,39 +281,45 @@ def main():
         else:
             print(f"  {f}  ->  source is newer ({src_date[:10] if src_date else '?'})")
 
-    # ---- Phase 1: Push newer target files to source ----
+    # ---- Phase 1: Push newer target files to source via fork ----
     if push_to_source:
         print(f"\n--- Phase 1: pushing {len(push_to_source)} file(s) to source ---\n")
 
-        # Create or reset sync branch
-        run(["git", "checkout", SOURCE_BRANCH], cwd=source_dir)
-        run(["git", "branch", "-D", SYNC_BRANCH], cwd=source_dir)
-        run(["git", "checkout", "-b", SYNC_BRANCH], cwd=source_dir)
-
-        for f, (abs_path, from_repo) in sorted(push_to_source.items()):
-            dest_path = os.path.join(source_root, f)
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            shutil.copy2(abs_path, dest_path)
-            print(f"  {f}  <-  {from_repo.split('/')[1]}")
-
-        run(["git", "add", "-A"], cwd=source_dir)
-        repos_short = sorted(set(r.split("/")[1] for _, (_, r) in push_to_source.items()))
-        msg = f"sync: pull newer shared components from {', '.join(repos_short)}"
-        commit = run(["git", "commit", "-m", msg], cwd=source_dir)
-
-        if commit.returncode != 0:
-            print("  No changes to commit (source already up to date)")
+        print(f"  Forking {SOURCE_REPO}...")
+        source_fork = ensure_fork(SOURCE_REPO)
+        if not source_fork:
+            print("  ERROR: Could not fork source repo")
         else:
-            push = run(["git", "push", "--force", "origin", SYNC_BRANCH], cwd=source_dir)
-            if push.returncode == 0:
-                body_lines = ["Pulls newer changes from docs repos:\n"]
-                for f, (_, repo) in sorted(push_to_source.items()):
-                    body_lines.append(f"- `{f}` from **{repo}**")
-                create_pr(SOURCE_REPO, SYNC_BRANCH, SOURCE_BRANCH,
-                          "sync: pull newer shared components from docs repos",
-                          "\n".join(body_lines))
+            add_fork_remote(source_fork, source_dir)
+
+            run(["git", "checkout", SOURCE_BRANCH], cwd=source_dir)
+            run(["git", "branch", "-D", SYNC_BRANCH], cwd=source_dir)
+            run(["git", "checkout", "-b", SYNC_BRANCH], cwd=source_dir)
+
+            for f, (abs_path, from_repo) in sorted(push_to_source.items()):
+                dest_path = os.path.join(source_root, f)
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                shutil.copy2(abs_path, dest_path)
+                print(f"  {f}  <-  {from_repo.split('/')[1]}")
+
+            run(["git", "add", "-A"], cwd=source_dir)
+            repos_short = sorted(set(r.split("/")[1] for _, (_, r) in push_to_source.items()))
+            msg = f"sync: pull newer shared components from {', '.join(repos_short)}"
+            commit = run(["git", "commit", "-m", msg], cwd=source_dir)
+
+            if commit.returncode != 0:
+                print("  No changes to commit (source already up to date)")
             else:
-                print(f"  Push failed: {push.stderr.strip()}")
+                push = run(["git", "push", "--force", "fork", SYNC_BRANCH], cwd=source_dir)
+                if push.returncode == 0:
+                    body_lines = ["Pulls newer changes from docs repos:\n"]
+                    for f, (_, repo) in sorted(push_to_source.items()):
+                        body_lines.append(f"- `{f}` from **{repo}**")
+                    create_pr(SOURCE_REPO, gh_user, SYNC_BRANCH, SOURCE_BRANCH,
+                              "sync: pull newer shared components from docs repos",
+                              "\n".join(body_lines))
+                else:
+                    print(f"  Push failed: {push.stderr.strip()}")
     else:
         print("\nSource is already up to date — no Phase 1 PR needed.")
 
@@ -285,14 +328,12 @@ def main():
     if os.path.exists(canonical_dir):
         shutil.rmtree(canonical_dir)
 
-    # Start from source
-    for f, h in source_files.items():
+    for f in source_files:
         src = os.path.join(source_root, f)
         dst = os.path.join(canonical_dir, f)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(src, dst)
 
-    # Overlay newer target files
     for f, (abs_path, _) in push_to_source.items():
         dst = os.path.join(canonical_dir, f)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -300,7 +341,7 @@ def main():
 
     canonical_files = get_file_map(canonical_dir)
 
-    # ---- Phase 2: Sync canonical source to each target ----
+    # ---- Phase 2: Sync canonical source to each target via forks ----
     print(f"\n--- Phase 2: syncing canonical source to targets ---\n")
 
     for target in TARGETS:
@@ -314,7 +355,6 @@ def main():
         base_branch = info["branch"]
         tgt_files = info["files"]
 
-        # Figure out which files need updating
         to_update = []
         for f in canonical_files:
             if f not in tgt_files or canonical_files[f] != tgt_files[f]:
@@ -326,15 +366,23 @@ def main():
 
         print(f"  {repo}: {len(to_update)} file(s) to update")
 
+        print(f"    Forking {repo}...")
+        fork = ensure_fork(repo)
+        if not fork:
+            print(f"    ERROR: Could not fork {repo}")
+            continue
+
+        add_fork_remote(fork, dest)
+
         run(["git", "checkout", base_branch], cwd=dest)
         run(["git", "branch", "-D", SYNC_BRANCH], cwd=dest)
         run(["git", "checkout", "-b", SYNC_BRANCH], cwd=dest)
 
         for f in sorted(to_update):
             src = os.path.join(canonical_dir, f)
-            dst = os.path.join(target_root, f)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(src, dst)
+            dst_path = os.path.join(target_root, f)
+            os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+            shutil.copy2(src, dst_path)
             print(f"    {f}")
 
         run(["git", "add", "-A"], cwd=dest)
@@ -346,7 +394,7 @@ def main():
             print(f"    No changes to commit")
             continue
 
-        push = run(["git", "push", "--force", "origin", SYNC_BRANCH], cwd=dest)
+        push = run(["git", "push", "--force", "fork", SYNC_BRANCH], cwd=dest)
         if push.returncode == 0:
             body_lines = [
                 f"Syncs `{info['shared_path']}` with "
@@ -356,7 +404,7 @@ def main():
             ]
             for f in sorted(to_update):
                 body_lines.append(f"- `{f}`")
-            create_pr(repo, SYNC_BRANCH, base_branch,
+            create_pr(repo, gh_user, SYNC_BRANCH, base_branch,
                       "sync: update shared Docusaurus components",
                       "\n".join(body_lines))
         else:
