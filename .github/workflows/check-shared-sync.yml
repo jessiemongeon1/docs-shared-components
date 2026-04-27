@@ -1,0 +1,47 @@
+name: Shared Docusaurus Sync
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'  # Weekly on Monday at 8am UTC
+  workflow_dispatch:
+
+jobs:
+  sync:
+    name: Detect & sync shared components
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Sync shared components
+        env:
+          GH_TOKEN: ${{ secrets.DOCS_MONITOR_PAT }}
+        run: python scripts/sync.py
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-report
+          path: /tmp/shared-sync/report.md
+          if-no-files-found: ignore
+
+      - name: Notify Slack
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            exit 0
+          fi
+          payload=$(jq -n \
+            --arg text "*Shared Docusaurus Sync:* Weekly sync complete. See workflow run for details." \
+            '{text: $text}')
+          curl -s -X POST -H 'Content-Type: application/json' \
+            -d "$payload" "$SLACK_WEBHOOK_URL"
