@@ -79,18 +79,23 @@ def ensure_fork(upstream_repo):
     repo_name = upstream_repo.split("/")[1]
     fork = f"{user}/{repo_name}"
 
-    # Check if the fork already exists
+    # Check if the fork already exists and is accessible
     r = gh(["api", f"repos/{fork}", "--jq", ".full_name"])
     if r.returncode == 0 and r.stdout.strip():
+        print(f"    Using existing fork: {r.stdout.strip()}")
         return r.stdout.strip()
 
     # Try to create the fork
-    r = gh(["repo", "fork", upstream_repo, "--clone=false"])
-    if r.returncode == 0:
-        return fork
+    gh(["repo", "fork", upstream_repo, "--clone=false"])
 
-    # Fork failed — fall back to pushing directly to upstream
-    print(f"    Fork failed, will push directly to {upstream_repo}")
+    # Verify the fork actually exists now (don't trust gh exit code)
+    r = gh(["api", f"repos/{fork}", "--jq", ".full_name"])
+    if r.returncode == 0 and r.stdout.strip():
+        print(f"    Forked to: {r.stdout.strip()}")
+        return r.stdout.strip()
+
+    # Fork doesn't exist — fall back to pushing directly to upstream
+    print(f"    Fork unavailable, will push directly to {upstream_repo}")
     return upstream_repo
 
 
