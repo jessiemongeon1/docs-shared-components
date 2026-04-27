@@ -14,6 +14,7 @@ then opens PRs from the fork to upstream.
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -42,6 +43,43 @@ IGNORE = {
 
 WORK_DIR = os.environ.get("WORK_DIR", "/tmp/shared-sync")
 SYNC_BRANCH = "auto-sync/shared-docusaurus"
+
+# License headers — source repo and most targets use Mysten Labs; walrus uses Walrus Foundation.
+MYSTEN_HEADER_BLOCK = "/*\n// Copyright (c) Mysten Labs, Inc.\n// SPDX-License-Identifier: Apache-2.0\n*/"
+MYSTEN_HEADER_BARE = "// Copyright (c) Mysten Labs, Inc.\n// SPDX-License-Identifier: Apache-2.0"
+WALRUS_HEADER = "// Copyright (c) Walrus Foundation\n// SPDX-License-Identifier: Apache-2.0"
+
+# Regex that matches any of the three header styles at the start of a file
+_LICENSE_RE = re.compile(
+    r"^(?:"
+    r"/\*\s*\n//\s*Copyright \(c\)[^\n]+\n//\s*SPDX-License-Identifier:[^\n]+\n\*/\n?"
+    r"|"
+    r"//\s*Copyright \(c\)[^\n]+\n//\s*SPDX-License-Identifier:[^\n]+\n?"
+    r")"
+)
+
+# Which repos use which license
+WALRUS_REPOS = {"MystenLabs/walrus"}
+
+
+def replace_license(content, repo):
+    """Replace the license header in content to match the target repo."""
+    if repo in WALRUS_REPOS:
+        new_header = WALRUS_HEADER + "\n"
+    else:
+        new_header = MYSTEN_HEADER_BLOCK + "\n"
+    if _LICENSE_RE.match(content):
+        return _LICENSE_RE.sub(new_header, content, count=1)
+    # No header found — prepend
+    return new_header + content
+
+
+def normalize_to_source_license(content):
+    """Normalize any license header to the Mysten Labs block style (for source repo)."""
+    new_header = MYSTEN_HEADER_BLOCK + "\n"
+    if _LICENSE_RE.match(content):
+        return _LICENSE_RE.sub(new_header, content, count=1)
+    return new_header + content
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +365,9 @@ def main():
                 dest_path = os.path.join(source_root, f)
                 os.makedirs(os.path.dirname(dest_path), exist_ok=True)
                 shutil.copy2(abs_path, dest_path)
+                # Normalize license to Mysten Labs for source repo
+                content = Path(dest_path).read_text()
+                Path(dest_path).write_text(normalize_to_source_license(content))
                 print(f"  {f}  <-  {from_repo.split('/')[1]}")
 
             run(["git", "add", "-A"], cwd=source_dir)
@@ -383,9 +424,11 @@ def main():
         base_branch = info["branch"]
         tgt_files = info["files"]
 
+        # Only update files the target already has — don't add repo-specific
+        # files from other repos (e.g. generate-llmstxt is sui-only)
         to_update = []
         for f in canonical_files:
-            if f not in tgt_files or canonical_files[f] != tgt_files[f]:
+            if f in tgt_files and canonical_files[f] != tgt_files[f]:
                 to_update.append(f)
 
         if not to_update:
@@ -412,6 +455,9 @@ def main():
             dst_path = os.path.join(target_root, f)
             os.makedirs(os.path.dirname(dst_path), exist_ok=True)
             shutil.copy2(src, dst_path)
+            # Apply the correct license header for this repo
+            content = Path(dst_path).read_text()
+            Path(dst_path).write_text(replace_license(content, repo))
             print(f"    {f}")
 
         run(["git", "add", "-A"], cwd=dest)
