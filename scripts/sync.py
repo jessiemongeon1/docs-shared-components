@@ -78,8 +78,11 @@ def replace_license(content, repo, filepath):
     """Replace the license header in content to match the target repo."""
     header = _header_for(repo, filepath)
     if _LICENSE_RE.match(content):
-        return _LICENSE_RE.sub(header, content, count=1)
-    return header + content
+        result = _LICENSE_RE.sub(header, content, count=1)
+    else:
+        result = header + content
+    # Ensure file ends with exactly one newline
+    return result.rstrip("\n") + "\n"
 
 
 def normalize_to_source_license(content, filepath):
@@ -452,7 +455,7 @@ def main():
 
             run(["git", "add", "-A"], cwd=source_dir)
             repos_short = sorted(set(r.split("/")[1] for _, (_, r) in push_to_source.items()))
-            msg = f"sync: pull newer shared components from {', '.join(repos_short)}"
+            msg = f"chore: sync shared components from {', '.join(repos_short)}"
             commit = run(["git", "commit", "-m", msg], cwd=source_dir)
 
             if commit.returncode != 0:
@@ -465,7 +468,7 @@ def main():
                         body_lines.append(f"- `{f}` from **{repo}**")
                     head = f"{pr_head_user}:{SYNC_BRANCH}" if pr_head_user else SYNC_BRANCH
                     create_pr(SOURCE_REPO, pr_head_user, SYNC_BRANCH, SOURCE_BRANCH,
-                              "sync: pull newer shared components from docs repos",
+                              "chore: sync shared components from docs repos",
                               "\n".join(body_lines))
                 else:
                     print(f"  Push failed: {push.stderr.strip()}")
@@ -548,7 +551,7 @@ def main():
 
         run(["git", "add", "-A"], cwd=dest)
         commit = run(["git", "commit", "-m",
-                       "sync: update shared Docusaurus components from source"],
+                       "chore: sync shared Docusaurus components from source"],
                       cwd=dest)
 
         if commit.returncode != 0:
@@ -566,7 +569,7 @@ def main():
             for f in sorted(to_update):
                 body_lines.append(f"- `{f}`")
             create_pr(repo, pr_head_user, SYNC_BRANCH, base_branch,
-                      "sync: update shared Docusaurus components",
+                      "chore: sync shared Docusaurus components",
                       "\n".join(body_lines))
         else:
             print(f"    Push failed: {push.stderr.strip()}")
