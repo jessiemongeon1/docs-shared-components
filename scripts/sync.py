@@ -87,6 +87,36 @@ def normalize_to_source_license(content, filepath):
     return replace_license(content, "MystenLabs/source", filepath)
 
 
+def _strip_for_compare(content):
+    """Strip license header and normalize whitespace for content comparison.
+    Ignores license differences and trivial blank-line / trailing-whitespace changes."""
+    text = _LICENSE_RE.sub("", content)
+    text = text.replace("\r\n", "\n")
+    lines = [line.rstrip() for line in text.split("\n")]
+    # Collapse consecutive blank lines
+    result = []
+    prev_blank = False
+    for line in lines:
+        if line == "":
+            if not prev_blank:
+                result.append(line)
+            prev_blank = True
+        else:
+            result.append(line)
+            prev_blank = False
+    return "\n".join(result).strip()
+
+
+def files_effectively_equal(path_a, path_b):
+    """True if two files have the same content ignoring license headers and whitespace."""
+    try:
+        a = Path(path_a).read_text()
+        b = Path(path_b).read_text()
+        return _strip_for_compare(a) == _strip_for_compare(b)
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -332,11 +362,15 @@ def main():
         print(f"  {len(target_files)} file(s)\n")
 
     # ---- Detect modified files and determine direction ----
+    # Skip files that only differ by license header or whitespace.
     modified_files = {}  # rel_file -> {repo: target_root_path}
     for repo, info in target_info.items():
         for f in source_files:
             if f in info["files"] and source_files[f] != info["files"][f]:
-                modified_files.setdefault(f, {})[repo] = info["root"]
+                src_path = os.path.join(source_root, f)
+                tgt_path = os.path.join(info["root"], f)
+                if not files_effectively_equal(src_path, tgt_path):
+                    modified_files.setdefault(f, {})[repo] = info["root"]
 
     if not modified_files and not any(
         set(source_files) - set(info["files"]) for info in target_info.values()
@@ -455,11 +489,15 @@ def main():
         tgt_files = info["files"]
 
         # Only update files the target already has — don't add repo-specific
-        # files from other repos (e.g. generate-llmstxt is sui-only)
+        # files from other repos (e.g. generate-llmstxt is sui-only).
+        # Skip files that only differ by license header or whitespace.
         to_update = []
         for f in canonical_files:
             if f in tgt_files and canonical_files[f] != tgt_files[f]:
-                to_update.append(f)
+                can_path = os.path.join(canonical_dir, f)
+                tgt_path = os.path.join(target_root, f)
+                if not files_effectively_equal(can_path, tgt_path):
+                    to_update.append(f)
 
         if not to_update:
             print(f"  {repo}: already matches canonical — skipping")
