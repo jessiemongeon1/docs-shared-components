@@ -12,6 +12,7 @@ Uses a fork-based workflow: pushes branches to your fork of each repo,
 then opens PRs from the fork to upstream.
 """
 
+import argparse
 import hashlib
 import os
 import re
@@ -250,7 +251,18 @@ def create_pr(upstream_repo, gh_user, branch, base, title, body):
 # ---------------------------------------------------------------------------
 
 
+def parse_args():
+    p = argparse.ArgumentParser(description="Sync shared Docusaurus components")
+    p.add_argument("--target", metavar="REPO",
+                   help="Only sync a single target repo (e.g. MystenLabs/sui)")
+    p.add_argument("--phase2-only", action="store_true",
+                   help="Skip Phase 1 (push to source). Only pull source to targets.")
+    return p.parse_args()
+
+
 def main():
+    args = parse_args()
+
     print("=== Shared Docusaurus Sync ===\n")
 
     # Detect authenticated user
@@ -259,6 +271,17 @@ def main():
         print("ERROR: Could not detect GitHub user. Set GH_TOKEN or run gh auth login.")
         sys.exit(1)
     print(f"Authenticated as: {gh_user}\n")
+
+    # Filter targets if --target is specified
+    targets = TARGETS
+    if args.target:
+        targets = [t for t in TARGETS if t["repo"] == args.target]
+        if not targets:
+            print(f"ERROR: Unknown target '{args.target}'. Options:")
+            for t in TARGETS:
+                print(f"  {t['repo']}")
+            sys.exit(1)
+        print(f"Target: {args.target}\n")
 
     if os.path.exists(WORK_DIR):
         shutil.rmtree(WORK_DIR)
@@ -279,7 +302,7 @@ def main():
     # ---- Clone targets ----
     target_info = {}  # repo -> {dest, root, shared_path, branch, files}
 
-    for target in TARGETS:
+    for target in targets:
         repo = target["repo"]
         shared_path = target["shared_path"]
         print(f"Cloning {repo}...")
@@ -321,36 +344,39 @@ def main():
         print("Everything is in sync. Nothing to do.")
         return
 
-    print(f"Checking commit dates for {len(modified_files)} modified file(s)...\n")
-
     push_to_source = {}  # rel_file -> (abs_path_of_newest, from_repo)
 
-    for f in sorted(modified_files):
-        src_git_path = f"{SOURCE_PATH}/{f}" if SOURCE_PATH else f
-        src_date = get_commit_date(source_dir, src_git_path)
+    if args.phase2_only:
+        print("Phase 1 skipped (--phase2-only)\n")
+    else:
+        print(f"Checking commit dates for {len(modified_files)} modified file(s)...\n")
 
-        newest_repo = None
-        newest_date = src_date
-        newest_abs = None
+        for f in sorted(modified_files):
+            src_git_path = f"{SOURCE_PATH}/{f}" if SOURCE_PATH else f
+            src_date = get_commit_date(source_dir, src_git_path)
 
-        for repo, target_root in modified_files[f].items():
-            tgt_git_path = f"{target_info[repo]['shared_path']}/{f}"
-            tgt_date = get_commit_date(target_info[repo]["dest"], tgt_git_path)
+            newest_repo = None
+            newest_date = src_date
+            newest_abs = None
 
-            if tgt_date and (not newest_date or tgt_date > newest_date):
-                newest_date = tgt_date
-                newest_repo = repo
-                newest_abs = os.path.join(target_root, f)
+            for repo, target_root in modified_files[f].items():
+                tgt_git_path = f"{target_info[repo]['shared_path']}/{f}"
+                tgt_date = get_commit_date(target_info[repo]["dest"], tgt_git_path)
 
-        if newest_repo:
-            push_to_source[f] = (newest_abs, newest_repo)
-            short = newest_repo.split("/")[1]
-            print(f"  {f}  ->  {short} is newer ({newest_date[:10] if newest_date else '?'})")
-        else:
-            print(f"  {f}  ->  source is newer ({src_date[:10] if src_date else '?'})")
+                if tgt_date and (not newest_date or tgt_date > newest_date):
+                    newest_date = tgt_date
+                    newest_repo = repo
+                    newest_abs = os.path.join(target_root, f)
+
+            if newest_repo:
+                push_to_source[f] = (newest_abs, newest_repo)
+                short = newest_repo.split("/")[1]
+                print(f"  {f}  ->  {short} is newer ({newest_date[:10] if newest_date else '?'})")
+            else:
+                print(f"  {f}  ->  source is newer ({src_date[:10] if src_date else '?'})")
 
     # ---- Phase 1: Push newer target files to source via fork ----
-    if push_to_source:
+    if push_to_source and not args.phase2_only:
         print(f"\n--- Phase 1: pushing {len(push_to_source)} file(s) to source ---\n")
 
         source_fork = ensure_fork(SOURCE_REPO)
@@ -417,7 +443,7 @@ def main():
     # ---- Phase 2: Sync canonical source to each target via forks ----
     print(f"\n--- Phase 2: syncing canonical source to targets ---\n")
 
-    for target in TARGETS:
+    for target in targets:
         repo = target["repo"]
         if repo not in target_info:
             continue

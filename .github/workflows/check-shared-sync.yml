@@ -1,9 +1,31 @@
 name: Shared Docusaurus Sync
 
 on:
+  # Fires when source repo pushes to master (configure a webhook in ML-Shared-Docusaurus)
+  repository_dispatch:
+    types: [source-updated]
+
+  # Weekly full sync (both phases, all targets)
   schedule:
-    - cron: '0 8 * * 1'  # Weekly on Monday at 8am UTC
+    - cron: '0 8 * * 1'
+
+  # Manual run — pick a single site or all
   workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target repo (blank = all)'
+        required: false
+        type: choice
+        options:
+          - ''
+          - MystenLabs/sui
+          - MystenLabs/walrus
+          - MystenLabs/seal
+          - MystenLabs/suins-contracts
+      phase2_only:
+        description: 'Skip Phase 1 (only pull source to targets)'
+        type: boolean
+        default: false
 
 jobs:
   sync:
@@ -22,7 +44,23 @@ jobs:
       - name: Sync shared components
         env:
           GH_TOKEN: ${{ secrets.DOCS_MONITOR_PAT }}
-        run: python scripts/sync.py
+        run: |
+          args=""
+
+          # repository_dispatch from source update → phase2-only to all targets
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            args="--phase2-only"
+          fi
+
+          # workflow_dispatch inputs
+          if [ -n "${{ inputs.target }}" ]; then
+            args="$args --target ${{ inputs.target }}"
+          fi
+          if [ "${{ inputs.phase2_only }}" = "true" ]; then
+            args="$args --phase2-only"
+          fi
+
+          python scripts/sync.py $args
 
       - name: Upload report
         if: always()
@@ -40,8 +78,16 @@ jobs:
           if [ -z "$SLACK_WEBHOOK_URL" ]; then
             exit 0
           fi
-          payload=$(jq -n \
-            --arg text "*Shared Docusaurus Sync:* Weekly sync complete. See workflow run for details." \
-            '{text: $text}')
+          event="${{ github.event_name }}"
+          target="${{ inputs.target }}"
+          msg="*Shared Docusaurus Sync:* "
+          if [ "$event" = "repository_dispatch" ]; then
+            msg="${msg}Source updated — syncing to all targets."
+          elif [ -n "$target" ]; then
+            msg="${msg}Manual sync to ${target}."
+          else
+            msg="${msg}Weekly full sync complete."
+          fi
+          payload=$(jq -n --arg text "$msg See workflow run for details." '{text: $text}')
           curl -s -X POST -H 'Content-Type: application/json' \
             -d "$payload" "$SLACK_WEBHOOK_URL"

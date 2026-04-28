@@ -1,0 +1,22 @@
+# Add this workflow to MystenLabs/ML-Shared-Docusaurus/.github/workflows/
+# It fires a repository_dispatch to docs-shared-components on every push to master.
+
+name: Notify docs-shared-sync
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger sync
+        env:
+          GH_TOKEN: ${{ secrets.DOCS_SYNC_PAT }}
+        run: |
+          gh api repos/jessiemongeon1/docs-shared-components/dispatches \
+            -X POST \
+            -f event_type=source-updated \
+            -f "client_payload[sha]=${{ github.sha }}" \
+            -f "client_payload[ref]=${{ github.ref }}"
