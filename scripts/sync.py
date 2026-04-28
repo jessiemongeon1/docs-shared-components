@@ -87,6 +87,20 @@ def normalize_to_source_license(content, filepath):
     return replace_license(content, "MystenLabs/source", filepath)
 
 
+# String literals that reference repo-specific build aliases — files containing
+# these are not safely portable across repos and should be skipped during sync.
+_REPO_SPECIFIC_IMPORT_RE = re.compile(r'["\']@(?:generated|docs)/')
+
+
+def has_repo_specific_paths(filepath):
+    """True if the file contains imports from repo-specific aliases."""
+    try:
+        content = Path(filepath).read_text()
+        return bool(_REPO_SPECIFIC_IMPORT_RE.search(content))
+    except Exception:
+        return False
+
+
 def _strip_for_compare(content):
     """Strip license header and normalize whitespace for content comparison.
     Ignores license differences and trivial blank-line / trailing-whitespace changes."""
@@ -369,6 +383,8 @@ def main():
             if f in info["files"] and source_files[f] != info["files"][f]:
                 src_path = os.path.join(source_root, f)
                 tgt_path = os.path.join(info["root"], f)
+                if has_repo_specific_paths(src_path) or has_repo_specific_paths(tgt_path):
+                    continue
                 if not files_effectively_equal(src_path, tgt_path):
                     modified_files.setdefault(f, {})[repo] = info["root"]
 
@@ -496,6 +512,8 @@ def main():
             if f in tgt_files and canonical_files[f] != tgt_files[f]:
                 can_path = os.path.join(canonical_dir, f)
                 tgt_path = os.path.join(target_root, f)
+                if has_repo_specific_paths(can_path) or has_repo_specific_paths(tgt_path):
+                    continue
                 if not files_effectively_equal(can_path, tgt_path):
                     to_update.append(f)
 
