@@ -44,42 +44,46 @@ IGNORE = {
 WORK_DIR = os.environ.get("WORK_DIR", "/tmp/shared-sync")
 SYNC_BRANCH = "auto-sync/shared-docusaurus"
 
-# License headers — source repo and most targets use Mysten Labs; walrus uses Walrus Foundation.
-MYSTEN_HEADER_BLOCK = "/*\n// Copyright (c) Mysten Labs, Inc.\n// SPDX-License-Identifier: Apache-2.0\n*/"
-MYSTEN_HEADER_BARE = "// Copyright (c) Mysten Labs, Inc.\n// SPDX-License-Identifier: Apache-2.0"
-WALRUS_HEADER = "// Copyright (c) Walrus Foundation\n// SPDX-License-Identifier: Apache-2.0"
+# License headers per file type and repo.
+# JS/TS: Mysten uses /* // ... */ block, Walrus uses bare // lines.
+# CSS:   Both use /* ... */ but Mysten has // prefixes inside, Walrus doesn't.
+WALRUS_REPOS = {"MystenLabs/walrus"}
 
-# Regex that matches any of the three header styles at the start of a file
+# Regex that matches any copyright block at the start of a file:
+#   /* ... Copyright ... SPDX ... */   or   // Copyright ... // SPDX ...
 _LICENSE_RE = re.compile(
     r"^(?:"
-    r"/\*\s*\n//\s*Copyright \(c\)[^\n]+\n//\s*SPDX-License-Identifier:[^\n]+\n\*/\n?"
+    r"/\*[\s\S]*?Copyright \(c\)[\s\S]*?SPDX-License-Identifier:[^\n]*\n\*/\n?"
     r"|"
     r"//\s*Copyright \(c\)[^\n]+\n//\s*SPDX-License-Identifier:[^\n]+\n?"
     r")"
 )
 
-# Which repos use which license
-WALRUS_REPOS = {"MystenLabs/walrus"}
 
-
-def replace_license(content, repo):
-    """Replace the license header in content to match the target repo."""
+def _header_for(repo, filepath):
+    """Return the correct license header string for a repo + file type."""
+    is_css = filepath.endswith(".css")
     if repo in WALRUS_REPOS:
-        new_header = WALRUS_HEADER + "\n"
+        if is_css:
+            return "/*\n  Copyright (c) Walrus Foundation\n  SPDX-License-Identifier: Apache-2.0\n*/\n"
+        return "// Copyright (c) Walrus Foundation\n// SPDX-License-Identifier: Apache-2.0\n"
     else:
-        new_header = MYSTEN_HEADER_BLOCK + "\n"
-    if _LICENSE_RE.match(content):
-        return _LICENSE_RE.sub(new_header, content, count=1)
-    # No header found — prepend
-    return new_header + content
+        if is_css:
+            return "/*\n// Copyright (c) Mysten Labs, Inc.\n// SPDX-License-Identifier: Apache-2.0\n*/\n"
+        return "/*\n// Copyright (c) Mysten Labs, Inc.\n// SPDX-License-Identifier: Apache-2.0\n*/\n"
 
 
-def normalize_to_source_license(content):
-    """Normalize any license header to the Mysten Labs block style (for source repo)."""
-    new_header = MYSTEN_HEADER_BLOCK + "\n"
+def replace_license(content, repo, filepath):
+    """Replace the license header in content to match the target repo."""
+    header = _header_for(repo, filepath)
     if _LICENSE_RE.match(content):
-        return _LICENSE_RE.sub(new_header, content, count=1)
-    return new_header + content
+        return _LICENSE_RE.sub(header, content, count=1)
+    return header + content
+
+
+def normalize_to_source_license(content, filepath):
+    """Normalize any license header to the Mysten Labs style (for source repo)."""
+    return replace_license(content, "MystenLabs/source", filepath)
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +371,7 @@ def main():
                 shutil.copy2(abs_path, dest_path)
                 # Normalize license to Mysten Labs for source repo
                 content = Path(dest_path).read_text()
-                Path(dest_path).write_text(normalize_to_source_license(content))
+                Path(dest_path).write_text(normalize_to_source_license(content, f))
                 print(f"  {f}  <-  {from_repo.split('/')[1]}")
 
             run(["git", "add", "-A"], cwd=source_dir)
@@ -457,7 +461,7 @@ def main():
             shutil.copy2(src, dst_path)
             # Apply the correct license header for this repo
             content = Path(dst_path).read_text()
-            Path(dst_path).write_text(replace_license(content, repo))
+            Path(dst_path).write_text(replace_license(content, repo, f))
             print(f"    {f}")
 
         run(["git", "add", "-A"], cwd=dest)
