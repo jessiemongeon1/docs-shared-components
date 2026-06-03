@@ -34,6 +34,7 @@ TARGETS = [
     {"repo": "MystenLabs/walrus", "shared_path": "docs/site/src/shared"},
     {"repo": "MystenLabs/seal", "shared_path": "docs/site/src/shared"},
     {"repo": "MystenLabs/suins-contracts", "shared_path": "documentation/site/src/shared"},
+    {"repo": "MystenLabs/hashi", "shared_path": "design/src/shared"},
 ]
 
 IGNORE = {
